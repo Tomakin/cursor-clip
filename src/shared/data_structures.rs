@@ -66,6 +66,14 @@ pub enum BackendMessage {
     Error { message: String },
 }
 
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub enum LauncherMessage {
+    /// Show the overlay window
+    ShowOverlay,
+    /// Hide the overlay window
+    HideOverlay,
+}
+
 impl ClipboardContentType {
     pub fn type_from_preview(content: &str) -> Self {
         const PASSWORD_SPECIALS: &str = "!@#$%^&*()-_=+[]{};:,.<>?/\\|`~";

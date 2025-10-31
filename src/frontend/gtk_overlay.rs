@@ -16,6 +16,7 @@ pub static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 thread_local! {
     static OVERLAY_WINDOW: RefCell<Option<adw::ApplicationWindow>> = const { RefCell::new(None) };
     static OVERLAY_APP: RefCell<Option<Application>> = const { RefCell::new(None) };
+    static OVERLAY_LISTBOX: RefCell<Option<gtk4::ListBox>> = const { RefCell::new(None) };
 }
 
 pub fn is_close_requested() -> bool {
@@ -84,6 +85,9 @@ pub fn init_clipboard_overlay(x: f64, y: f64, prefetched_items: Vec<ClipboardIte
     OVERLAY_APP.with(|a| {
         *a.borrow_mut() = None;
     });
+    OVERLAY_LISTBOX.with(|l| {
+        *l.borrow_mut() = None;
+    });
     Ok(())
 }
 
@@ -127,6 +131,11 @@ fn create_layer_shell_window(
     // Create and set content (also obtain list_box for navigation)
     let (content, list_box) = generate_overlay_content(prefetched_items);
     window.set_content(Some(&content));
+
+    // Store list box for dynamic updates from other threads
+    OVERLAY_LISTBOX.with(|l| {
+        *l.borrow_mut() = Some(list_box.clone());
+    });
 
     // Add key controller (Esc/j/k/Enter navigation & activation)
     let key_controller = generate_key_controller(&list_box);
@@ -213,6 +222,8 @@ fn generate_overlay_content(mut prefetched_items: Vec<ClipboardItemPreview>) -> 
         placeholder_label.set_margin_top(20);
         placeholder_label.set_margin_bottom(20);
         placeholder_row.set_child(Some(&placeholder_label));
+        // Mark this row so we can remove it on first dynamic insert
+        placeholder_row.add_css_class("placeholder-row");
         list_box.append(&placeholder_row);
     }
 
@@ -245,14 +256,24 @@ fn generate_overlay_content(mut prefetched_items: Vec<ClipboardItemPreview>) -> 
     main_box.append(&scrolled_window);
 
     // Connect button signals
-    // When the three-dot menu button is clicked: hide overlay, wait 0s, then show overlay again
+    // Test hook: clicking the three-dot menu generates a demo item and inserts it dynamically
     three_dot_menu.connect_clicked(move |_| {
-        hide_overlay();
-        gtk4::glib::timeout_add_seconds_local(0, || {
-            show_overlay();
-            gtk4::glib::ControlFlow::Break
-        });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let nanos = now.as_nanos();
+        let secs = now.as_secs();
+
+        let demo = ClipboardItemPreview {
+            item_id: (nanos & 0xFFFF_FFFF_FFFF_FFFF) as u64, // pseudo-random-ish id for testing
+            content_preview: format!("Hello {}", nanos),
+            content_type: ClipboardContentType::Text,
+            timestamp: secs,
+        };
+
+        overlay_add_item(demo);
     });
+
     clear_button.connect_clicked(move |_| {
     match FrontendClient::new() {
             Ok(mut client) => {
@@ -271,6 +292,32 @@ fn generate_overlay_content(mut prefetched_items: Vec<ClipboardItemPreview>) -> 
     });
 
     (main_box, list_box)
+}
+
+/// Public helper to dynamically add a new clipboard preview to the overlay list.
+/// Safe to call from any thread; UI update is marshalled onto the GTK main loop.
+pub fn overlay_add_item(item: ClipboardItemPreview) {
+    // Marshal the UI update onto the GTK main loop; only capture Send types
+    gtk4::glib::MainContext::default().invoke(move || {
+        OVERLAY_LISTBOX.with(|lb| {
+            if let Some(ref list_box) = *lb.borrow() {
+                // If a placeholder row exists, remove it before inserting
+                if let Some(first_row) = list_box.row_at_index(0) {
+                    if first_row.has_css_class("placeholder-row") {
+                        list_box.remove(&first_row);
+                    }
+                }
+
+                // Build and insert new row at the top
+                let row = generate_listboxrow_from_preview(&item);
+                list_box.insert(&row, 0);
+                list_box.select_row(Some(&row));
+                row.grab_focus();
+            } else {
+                debug!("Overlay list box not available; ignoring new item update");
+            }
+        });
+    });
 }
 
 /// Build the key controller handling Esc (close), j/k or arrows (navigate) and Enter (activate)
@@ -400,6 +447,16 @@ pub fn hide_overlay() {
     OVERLAY_WINDOW.with(|window| {
         if let Some(ref win) = *window.borrow() {
             win.set_visible(false);
+        }
+    });
+}
+
+/// Set the overlay window position (X and Y). No-op if window isn't available.
+pub fn set_overlay_position(x: i32, y: i32) {
+    OVERLAY_WINDOW.with(|window| {
+        if let Some(ref win) = *window.borrow() {
+            win.set_margin(Edge::Top, y);
+            win.set_margin(Edge::Left, x);
         }
     });
 }
