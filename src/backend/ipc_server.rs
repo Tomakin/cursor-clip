@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::shared::{BackendMessage, FrontendMessage};
@@ -7,6 +8,21 @@ use super::wayland_clipboard::WaylandClipboardMonitor;
 use super::backend_state::BackendState;
 use log::{info, error};
 use bytes::Bytes;
+
+/// Lightweight wrapper around a write half that knows how to send BackendMessage lines
+struct IpcServerClient {
+    writer: OwnedWriteHalf,
+}
+
+impl IpcServerClient {
+    /// Serialize the BackendMessage as JSON and write it as a single newline-delimited line
+    async fn send(&mut self, message: &BackendMessage) -> Result<(), Box<dyn std::error::Error>> {
+        let response_json = serde_json::to_string(message)?;
+        self.writer.write_all(response_json.as_bytes()).await?;
+        self.writer.write_all(b"\n").await?;
+        Ok(())
+    }
+}
 
 pub async fn run_backend(monitor_only: bool) -> Result<(), Box<dyn std::error::Error>> { 
     // Remove existing socket if it exists
@@ -66,7 +82,8 @@ async fn handle_client(
     stream: UnixStream,
     state: Arc<Mutex<BackendState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, writer) = stream.into_split();
+    let mut client = IpcServerClient { writer };
     let mut lines = BufReader::new(reader).lines();
 
     while let Some(line) = lines.next_line().await? {
@@ -91,9 +108,7 @@ async fn handle_client(
             }
         };
 
-        let response_json = serde_json::to_string(&response)?;
-        writer.write_all(response_json.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
+        client.send(&response).await?;
     }
 
     Ok(())
