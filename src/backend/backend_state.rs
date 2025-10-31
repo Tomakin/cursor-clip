@@ -10,7 +10,7 @@ use wayland_protocols_wlr::data_control::v1::client::{
 use crate::backend::wayland_clipboard::MutexBackendState; // for QueueHandle type
 use wayland_client::{QueueHandle, Connection};
 
-use crate::shared::{ClipboardItem, ClipboardItemPreview, ClipboardContentType};
+use crate::shared::{ClipboardItem, ClipboardItemPreview, ClipboardContentType, BackendMessage};
 use indexmap::IndexMap;
 use bytes::Bytes;
 use log::{debug, info, warn};
@@ -74,7 +74,7 @@ impl BackendState {
         }
     }
 
-    pub fn add_clipboard_item_from_mime_map(&mut self, mut mime_content: IndexMap<String, Bytes>) -> Option<u64> {
+    pub fn add_clipboard_item(&mut self, mut mime_content: IndexMap<String, Bytes>) -> Option<u64> {
         if mime_content.is_empty() { return None; }
 
         // If we have image/png, prefer showing mime_type + bytes and set type to Image
@@ -106,11 +106,17 @@ impl BackendState {
         };
 
         // remove duplicates (todo change to more robust solution -> hashes)
-        self.history.retain(|existing| existing.content_preview != item.content_preview);
+        //self.history.retain(|existing| existing.content_preview != item.content_preview);
         self.history.insert(0, item);
         if self.history.len() > 100 { self.history.truncate(100); }
         let new_id = self.id_for_next_entry;
         self.id_for_next_entry += 1;
+        // Broadcast a NewItem push to all connected clients (best-effort)
+        if let Some(first) = self.history.first() {
+            let preview = ClipboardItemPreview::from(first);
+            // Ignore errors; no clients or disconnected senders will be cleaned up by server
+            crate::backend::ipc_server::send(BackendMessage::NewItem { item: preview });
+        }
         Some(new_id)
     }
 

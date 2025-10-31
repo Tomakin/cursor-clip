@@ -208,7 +208,7 @@ fn generate_overlay_content(mut prefetched_items: Vec<ClipboardItemPreview>) -> 
         }
     }
 
-        // Populate the list with clipboard items
+    // Populate the list with clipboard items
     for item in &prefetched_items {
         let row = generate_listboxrow_from_preview(item);
         list_box.append(&row);

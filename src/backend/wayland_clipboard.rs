@@ -321,7 +321,7 @@ fn process_all_data_formats(
     }
 
     if !mime_map.is_empty() {
-        if let Some(new_id) = backend_state.add_clipboard_item_from_mime_map(mime_map) {
+        if let Some(new_id) = backend_state.add_clipboard_item(mime_map) {
             // Only take ownership if we're NOT in monitor-only mode
             if !backend_state.monitor_only && !backend_state.suppress_next_selection_read {
                 if let Err(e) = backend_state.set_clipboard_by_id(new_id) {

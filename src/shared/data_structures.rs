@@ -52,7 +52,7 @@ pub enum FrontendMessage {
     ClearHistory,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BackendMessage {
     /// Response with clipboard history (previews only, no mime payloads)
     History { items: Vec<ClipboardItemPreview> },

@@ -2,19 +2,21 @@ use std::sync::{Arc, Mutex};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use crate::shared::{BackendMessage, FrontendMessage};
 use super::wayland_clipboard::WaylandClipboardMonitor;
 use super::backend_state::BackendState;
 use log::{info, error};
 use bytes::Bytes;
+use std::sync::{Mutex as StdMutex, OnceLock};
 
 /// Lightweight wrapper around a write half that knows how to send BackendMessage lines
-struct IpcServerClient {
+struct IpcServer {
     writer: OwnedWriteHalf,
 }
 
-impl IpcServerClient {
+impl IpcServer {
     /// Serialize the BackendMessage as JSON and write it as a single newline-delimited line
     async fn send(&mut self, message: &BackendMessage) -> Result<(), Box<dyn std::error::Error>> {
         let response_json = serde_json::to_string(message)?;
@@ -22,6 +24,23 @@ impl IpcServerClient {
         self.writer.write_all(b"\n").await?;
         Ok(())
     }
+}
+
+// ================= Push broadcast registry =================
+static PUSH_SENDERS: OnceLock<StdMutex<Vec<UnboundedSender<BackendMessage>>>> = OnceLock::new();
+
+fn push_senders() -> &'static StdMutex<Vec<UnboundedSender<BackendMessage>>> {
+    PUSH_SENDERS.get_or_init(|| StdMutex::new(Vec::new()))
+}
+
+pub fn register_push_sender(tx: UnboundedSender<BackendMessage>) {
+    push_senders().lock().unwrap().push(tx);
+}
+
+/// Broadcast a message to all registered clients; stale senders are dropped on failure.
+pub fn send(message: BackendMessage) {
+    let mut guard = push_senders().lock().unwrap();
+    guard.retain(|tx| tx.send(message.clone()).is_ok());
 }
 
 pub async fn run_backend(monitor_only: bool) -> Result<(), Box<dyn std::error::Error>> { 
@@ -61,7 +80,7 @@ pub async fn run_backend(monitor_only: bool) -> Result<(), Box<dyn std::error::E
         ] {
             let mut map = indexmap::IndexMap::new();
             map.insert("text/plain;charset=utf-8".to_string(), Bytes::from_static(sample.as_bytes()));
-            let _ = state_lock.add_clipboard_item_from_mime_map(map);
+            let _ = state_lock.add_clipboard_item(map);
         }
     }
 
@@ -83,8 +102,17 @@ async fn handle_client(
     state: Arc<Mutex<BackendState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (reader, writer) = stream.into_split();
-    let mut client = IpcServerClient { writer };
+    let mut client = IpcServer { writer };
     let mut lines = BufReader::new(reader).lines();
+
+    // Single writer task: serialize all socket writes from one channel
+    let (out_tx, mut out_rx) = unbounded_channel::<BackendMessage>();
+    register_push_sender(out_tx.clone());
+    tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            if client.send(&msg).await.is_err() { break; }
+        }
+    });
 
     while let Some(line) = lines.next_line().await? {
         let message: FrontendMessage = serde_json::from_str(&line)?;
@@ -108,7 +136,8 @@ async fn handle_client(
             }
         };
 
-        client.send(&response).await?;
+        // Enqueue the response (ignore error if client disconnected)
+        let _ = out_tx.send(response);
     }
 
     Ok(())
